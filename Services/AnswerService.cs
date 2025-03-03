@@ -4,6 +4,11 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
+using TriviaApp.Models;
+using TriviaApp.Hubs;
+
+
+namespace TriviaApp.Services{
 
 public class AnswerService
 {
@@ -60,4 +65,5 @@ public class AnswerService
             await _hubContext.Clients.Group(gameId.ToString()).SendAsync("DisplayAnswer", questionId);
         }
     }
+}
 }

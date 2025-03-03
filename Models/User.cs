@@ -1,7 +1,11 @@
 using Microsoft.AspNetCore.Identity;
+using TriviaApp.Models;
 
-public class User : IdentityUser
+
+namespace TriviaApp.Models{
+ public class User : IdentityUser
 {
  public int TeamId { get; set; }
  public Team Team { get; set; }
+}
 }
