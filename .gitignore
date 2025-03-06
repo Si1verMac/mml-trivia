@@ -1,0 +1,32 @@
+# .NET 8 Backend
+bin/
+obj/
+*.dll
+*.pdb
+*.exe
+
+# Visual Studio Code / Cursor
+.vscode/
+*.code-workspace
+cursor.settings/  
+
+# NuGet
+packages/
+*.nupkg
+
+# User-specific files
+*.user
+*.local
+
+# Logs and temporary files
+*.log
+*.tmp
+*.cache
+
+# Environment-specific settings
+appsettings.Development.json  
+.env
+
+# Test results
+TestResults/
+*.trx
