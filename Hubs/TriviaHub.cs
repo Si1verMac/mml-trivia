@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -10,20 +13,22 @@ namespace TriviaApp.Hubs
  public class TriviaHub : Hub
  {
   private readonly QuestionService _questionService;
+  private readonly AnswerService _answerService; // Added
   private readonly TriviaDbContext _dbContext;
   private readonly ILogger<TriviaHub> _logger;
 
-  // In-memory storage to track active (currently connected) teams for each game.
   private static readonly Dictionary<int, HashSet<int>> _activeTeams = new Dictionary<int, HashSet<int>>();
+  private static readonly Dictionary<string, (int gameId, int teamId)> _connectionMappings = new Dictionary<string, (int, int)>();
+  private static readonly Dictionary<int, HashSet<int>> _teamsReadyForNext = new Dictionary<int, HashSet<int>>();
 
-  public TriviaHub(QuestionService questionService, TriviaDbContext dbContext, ILogger<TriviaHub> logger)
+  public TriviaHub(QuestionService questionService, AnswerService answerService, TriviaDbContext dbContext, ILogger<TriviaHub> logger)
   {
    _questionService = questionService;
+   _answerService = answerService; // Added
    _dbContext = dbContext;
    _logger = logger;
   }
 
-  // Helper: Returns the count of active teams for a given game.
   public static int GetActiveTeamCount(int gameId)
   {
    lock (_activeTeams)
@@ -40,12 +45,22 @@ namespace TriviaApp.Hubs
     lock (_activeTeams)
     {
      if (!_activeTeams.ContainsKey(gameId))
-     {
       _activeTeams[gameId] = new HashSet<int>();
-     }
      _activeTeams[gameId].Add(teamId);
     }
+    lock (_connectionMappings)
+    {
+     _connectionMappings[Context.ConnectionId] = (gameId, teamId);
+    }
     await Clients.Group(gameId.ToString()).SendAsync("TeamJoined", new { gameId, teamId });
+
+    var game = await _dbContext.Games
+        .Include(g => g.CurrentQuestion)
+        .FirstOrDefaultAsync(g => g.Id == gameId);
+    if (game != null && game.Status == "InProgress" && game.CurrentQuestion != null)
+    {
+     await Clients.Caller.SendAsync("Question", game.CurrentQuestion);
+    }
    }
    catch (Exception ex)
    {
@@ -59,49 +74,101 @@ namespace TriviaApp.Hubs
    lock (_activeTeams)
    {
     if (_activeTeams.ContainsKey(gameId))
-    {
      _activeTeams[gameId].Remove(teamId);
-    }
+   }
+   lock (_connectionMappings)
+   {
+    _connectionMappings.Remove(Context.ConnectionId);
    }
   }
 
-  // This method is used for real-time notification when a team submits a wager.
-  // It checks the Answers table (via EF Core) to ensure that a team cannot submit more than once per question.
   public async Task SubmitWager(int gameId, int teamId, int wager, int questionId)
   {
    try
    {
-    // Check if an answer already exists for this game, team, and question.
-    var existingAnswer = await _dbContext.Answers
-        .FirstOrDefaultAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == questionId);
-    if (existingAnswer != null)
-    {
-     _logger.LogWarning("Team {TeamId} has already submitted an answer for question {QuestionId} in game {GameId}.", teamId, questionId, gameId);
-     return; // Prevent duplicate wager submissions.
-    }
-
-    // Broadcast real-time that this team submitted its wager.
-    await Clients.Group(gameId.ToString()).SendAsync("WagerSubmitted", new { gameId, teamId, wager, questionId });
-
-    // Count active teams for this game.
     int totalActiveTeams = GetActiveTeamCount(gameId);
-    // Count distinct submissions for this question from the Answers table.
     int submittedCount = await _dbContext.Answers
-        .Where(a => a.GameId == gameId && a.QuestionId == questionId)
+        .Where(a => a.GameId == gameId && a.QuestionId == questionId && a.Wager != null)
         .Select(a => a.TeamId)
         .Distinct()
         .CountAsync();
 
-    _logger.LogInformation("Game {GameId}: {SubmittedCount} of {TotalActiveTeams} active teams submitted answer for question {QuestionId}.",
-        gameId, submittedCount, totalActiveTeams, questionId);
+    _logger.LogInformation("Game {GameId}: {SubmittedCount} of {TotalActiveTeams} active teams submitted wager for question {QuestionId}.", gameId, submittedCount, totalActiveTeams, questionId);
+   }
+   catch (Exception ex)
+   {
+    await Clients.Caller.SendAsync("Error", ex.Message);
+   }
+  }
 
-    if (submittedCount >= totalActiveTeams && totalActiveTeams > 0)
+  // New SubmitAnswer method
+  public async Task SubmitAnswer(int gameId, int teamId, int questionId, string selectedAnswer, int wager)
+  {
+   try
+   {
+    var (isCorrect, allSubmitted) = await _answerService.SubmitAnswerAsync(gameId, teamId, questionId, selectedAnswer, wager);
+
+    // Notify only the submitting team
+    await Clients.Caller.SendAsync("AnswerSubmitted", new { teamId, isCorrect });
+
+    if (allSubmitted)
     {
      var question = await _dbContext.Questions.FindAsync(questionId);
      if (question != null)
      {
-      _logger.LogInformation("All active teams submitted answers for game {GameId}, question {QuestionId}. Broadcasting correct answer.", gameId, questionId);
       await Clients.Group(gameId.ToString()).SendAsync("DisplayAnswer", questionId, question.CorrectAnswer);
+     }
+    }
+   }
+   catch (Exception ex)
+   {
+    _logger.LogError(ex, "Error in SubmitAnswer for game {GameId}, team {TeamId}", gameId, teamId);
+    await Clients.Caller.SendAsync("Error", ex.Message);
+   }
+  }
+
+  public async Task SignalReadyForNext(int gameId, int teamId)
+  {
+   try
+   {
+    lock (_teamsReadyForNext)
+    {
+     if (!_teamsReadyForNext.ContainsKey(gameId))
+      _teamsReadyForNext[gameId] = new HashSet<int>();
+     if (_teamsReadyForNext[gameId].Add(teamId))
+     {
+      _logger.LogInformation("Team {TeamId} signaled ready for game {GameId}", teamId, gameId);
+     }
+     else
+     {
+      _logger.LogInformation("Team {TeamId} already signaled ready for game {GameId}", teamId, gameId);
+     }
+    }
+
+    int totalActiveTeams = GetActiveTeamCount(gameId);
+    int readyCount;
+    lock (_teamsReadyForNext)
+    {
+     readyCount = _teamsReadyForNext.ContainsKey(gameId) ? _teamsReadyForNext[gameId].Count : 0;
+    }
+
+    _logger.LogInformation("Game {GameId}: {ReadyCount} of {TotalActiveTeams} teams ready for next question.", gameId, readyCount, totalActiveTeams);
+
+    if (readyCount >= totalActiveTeams && totalActiveTeams > 0)
+    {
+     lock (_teamsReadyForNext)
+     {
+      _teamsReadyForNext.Remove(gameId);
+     }
+     var question = await _questionService.GetNextQuestion(gameId);
+     if (question != null)
+     {
+      await Clients.Group(gameId.ToString()).SendAsync("Question", question);
+      await Clients.Group(gameId.ToString()).SendAsync("AdvanceToNextQuestion");
+     }
+     else
+     {
+      await Clients.Group(gameId.ToString()).SendAsync("GameEnded");
      }
     }
    }
@@ -111,20 +178,34 @@ namespace TriviaApp.Hubs
    }
   }
 
-  public async Task ReadyForNextQuestion(int gameId, int teamId, int round, int questionId)
+  public override async Task OnDisconnectedAsync(Exception? exception)
   {
-   try
+   _logger.LogInformation("Connection {ConnectionId} disconnected", Context.ConnectionId);
+   int? teamIdToRemove = null;
+   int? gameIdToRemove = null;
+   lock (_connectionMappings)
    {
-    var question = await _questionService.GetNextQuestion(gameId);
-    if (question != null)
+    if (_connectionMappings.TryGetValue(Context.ConnectionId, out var mapping))
     {
-     await Clients.Group(gameId.ToString()).SendAsync("Question", question);
+     gameIdToRemove = mapping.gameId;
+     teamIdToRemove = mapping.teamId;
+     _connectionMappings.Remove(Context.ConnectionId);
     }
    }
-   catch (Exception ex)
+   if (gameIdToRemove.HasValue && teamIdToRemove.HasValue)
    {
-    await Clients.Caller.SendAsync("Error", ex.Message);
+    lock (_activeTeams)
+    {
+     if (_activeTeams.ContainsKey(gameIdToRemove.Value))
+      _activeTeams[gameIdToRemove.Value].Remove(teamIdToRemove.Value);
+    }
+    lock (_teamsReadyForNext)
+    {
+     if (_teamsReadyForNext.ContainsKey(gameIdToRemove.Value))
+      _teamsReadyForNext[gameIdToRemove.Value].Remove(teamIdToRemove.Value);
+    }
    }
+   await base.OnDisconnectedAsync(exception);
   }
  }
 }

@@ -1,6 +1,7 @@
 using System.Text;
 using DotNetEnv;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using TriviaApp.Data;
@@ -9,7 +10,6 @@ using TriviaApp.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Load environment variables
 Env.Load();
 builder.Configuration
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
@@ -20,7 +20,6 @@ var jwtKey = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationExcep
 var jwtIssuer = builder.Configuration["Jwt:Issuer"];
 var jwtAudience = builder.Configuration["Jwt:Audience"];
 
-// Setup database context with PostgreSQL
 builder.Services.AddDbContext<TriviaDbContext>(options =>
 {
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"),
@@ -34,12 +33,16 @@ builder.Services.AddDbContext<TriviaDbContext>(options =>
     options.EnableDetailedErrors();
 });
 
-// Register application services
-builder.Services.AddScoped<GameService>();
+builder.Services.AddScoped<GameService>(provider =>
+{
+    var context = provider.GetRequiredService<TriviaDbContext>();
+    var hubContext = provider.GetRequiredService<IHubContext<TriviaHub>>();
+    var logger = provider.GetRequiredService<ILogger<GameService>>();
+    return new GameService(context, hubContext, logger);
+});
 builder.Services.AddScoped<QuestionService>();
 builder.Services.AddScoped<AnswerService>();
 
-// Configure JWT Authentication
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -70,17 +73,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-// Configure CORS to allow frontend requests
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
-        policy.WithOrigins("http://localhost:5173")  // adjust if needed
+        policy.WithOrigins("http://localhost:5173")
               .AllowAnyMethod()
               .AllowAnyHeader()
               .AllowCredentials());
 });
 
-// Add controllers and configure SignalR with JSON protocol options to ignore cycles
 builder.Services.AddControllers();
 builder.Services.AddSignalR().AddJsonProtocol(options =>
 {
@@ -94,7 +95,6 @@ if (app.Environment.IsDevelopment())
     app.UseDeveloperExceptionPage();
 }
 
-// Middleware
 app.UseHttpsRedirection();
 app.UseCors("AllowFrontend");
 app.UseAuthentication();

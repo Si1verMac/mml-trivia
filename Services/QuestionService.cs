@@ -20,6 +20,9 @@ namespace TriviaApp.Services
             _logger = logger;
         }
 
+        /// <summary>
+        /// Retrieves the next unanswered question for the game, sets it as current, and broadcasts it as a DTO.
+        /// </summary>
         public async Task<Question?> GetNextQuestion(int gameId)
         {
             try
@@ -35,26 +38,27 @@ namespace TriviaApp.Services
                     return null;
                 }
 
-                var nextQuestion = game.GameQuestions
+                // Get first unanswered question.
+                var nextGameQuestion = game.GameQuestions
                     .Where(gq => !gq.IsAnswered)
                     .OrderBy(gq => gq.OrderIndex)
-                    .FirstOrDefault()
-                    ?.Question;
+                    .FirstOrDefault();
 
-                if (nextQuestion == null)
+                if (nextGameQuestion == null)
                 {
                     _logger.LogInformation("No more questions available for game {GameId}", gameId);
                     return null;
                 }
 
-                game.CurrentQuestion = nextQuestion;
-                game.CurrentQuestionId = nextQuestion.Id;
+                // Update the game’s current question.
+                game.CurrentQuestionId = nextGameQuestion.QuestionId;
+                game.CurrentQuestion = nextGameQuestion.Question;
                 await _context.SaveChangesAsync();
 
-                _logger.LogInformation("Retrieved next question {QuestionId} for game {GameId}", nextQuestion.Id, gameId);
-                // Use "Question" as the event name instead of "NewQuestion"
-                await _hubContext.Clients.Group(gameId.ToString()).SendAsync("Question", nextQuestion);
-                return nextQuestion;
+                _logger.LogInformation("Retrieved next question {QuestionId} for game {GameId}", nextGameQuestion.QuestionId, gameId);
+                // Use the event name "Question" for the client.
+                await _hubContext.Clients.Group(gameId.ToString()).SendAsync("Question", nextGameQuestion.Question);
+                return nextGameQuestion.Question;
             }
             catch (Exception ex)
             {
