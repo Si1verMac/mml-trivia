@@ -38,7 +38,7 @@ namespace TriviaApp.Services
                     return null;
                 }
 
-                // Get first unanswered question.
+                // Get first unanswered question FOR THIS SPECIFIC GAME.
                 var nextGameQuestion = game.GameQuestions
                     .Where(gq => !gq.IsAnswered)
                     .OrderBy(gq => gq.OrderIndex)
@@ -50,13 +50,14 @@ namespace TriviaApp.Services
                     return null;
                 }
 
-                // Update the game’s current question.
+                // Update the game's current question.
                 game.CurrentQuestionId = nextGameQuestion.QuestionId;
                 game.CurrentQuestion = nextGameQuestion.Question;
                 await _context.SaveChangesAsync();
 
                 _logger.LogInformation("Retrieved next question {QuestionId} for game {GameId}", nextGameQuestion.QuestionId, gameId);
-                // Use the event name "Question" for the client.
+                // Notify clients in the game about the new question with both naming conventions
+                await _hubContext.Clients.Group(gameId.ToString()).SendAsync("question", nextGameQuestion.Question);
                 await _hubContext.Clients.Group(gameId.ToString()).SendAsync("Question", nextGameQuestion.Question);
                 return nextGameQuestion.Question;
             }
@@ -69,12 +70,31 @@ namespace TriviaApp.Services
 
         public async Task<IEnumerable<Question>> GetQuestionsForGameAsync(int gameId)
         {
-            return await _context.GameQuestions
-                .Where(gq => gq.GameId == gameId)
-                .Include(gq => gq.Question)
-                .OrderBy(gq => gq.OrderIndex)
-                .Select(gq => gq.Question)
-                .ToListAsync();
+            try
+            {
+                _logger.LogInformation("Getting questions for game {GameId}", gameId);
+
+                var questions = await _context.GameQuestions
+                    .Where(gq => gq.GameId == gameId)
+                    .Include(gq => gq.Question)
+                    .OrderBy(gq => gq.OrderIndex)
+                    .Select(gq => gq.Question)
+                    .ToListAsync();
+
+                _logger.LogInformation("Retrieved {Count} questions for game {GameId}", questions.Count, gameId);
+
+                if (!questions.Any())
+                {
+                    _logger.LogWarning("No questions found for game {GameId}", gameId);
+                }
+
+                return questions;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting questions for game {GameId}", gameId);
+                return Enumerable.Empty<Question>();
+            }
         }
     }
 }

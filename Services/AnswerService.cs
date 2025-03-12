@@ -17,11 +17,10 @@ namespace TriviaApp.Services
         private readonly TriviaDbContext _context;
         private readonly ILogger<AnswerService> _logger;
 
-        public AnswerService(TriviaDbContext context, IHubContext<TriviaHub> hubContext, IConfiguration configuration, ILogger<AnswerService> logger)
+        public AnswerService(TriviaDbContext context, ILogger<AnswerService> logger)
         {
             _context = context ?? throw new ArgumentNullException(nameof(context));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-            // Note: _hubContext is kept for DI compatibility but not used here
         }
 
         public async Task<(bool isCorrect, bool allSubmitted)> SubmitAnswerAsync(int gameId, int teamId, int questionId, string selectedAnswer, int? wager)
@@ -37,9 +36,11 @@ namespace TriviaApp.Services
 
             bool isCorrect = selectedAnswer != null && selectedAnswer.Trim().Equals(question.CorrectAnswer.Trim(), StringComparison.OrdinalIgnoreCase);
 
-            var answer = await _context.Answers
-                .FirstOrDefaultAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == questionId);
+            // Calculate score change based on wager
+            int scoreChange = isCorrect ? wager ?? 0 : -(wager ?? 0); // Add wager if correct, subtract if incorrect
 
+            // Save or update answer
+            var answer = await _context.Answers.FirstOrDefaultAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == questionId);
             if (answer == null)
             {
                 answer = new Answer
@@ -62,7 +63,17 @@ namespace TriviaApp.Services
                 answer.SubmittedAt = DateTime.UtcNow;
                 _context.Answers.Update(answer);
             }
+
+            // Update team score
+            var gameTeam = await _context.GameTeams.FirstOrDefaultAsync(gt => gt.GameId == gameId && gt.TeamId == teamId);
+            if (gameTeam != null)
+            {
+                gameTeam.Score += scoreChange;
+                _context.GameTeams.Update(gameTeam);
+            }
+
             await _context.SaveChangesAsync();
+
 
             int totalActiveTeams = TriviaHub.GetActiveTeamCount(gameId);
             int submittedCount = await _context.Answers
@@ -70,9 +81,6 @@ namespace TriviaApp.Services
                 .Select(a => a.TeamId)
                 .Distinct()
                 .CountAsync();
-
-            _logger.LogInformation("Game {GameId}: {SubmittedCount} of {TotalActiveTeams} active teams submitted answer for question {QuestionId}.",
-                gameId, submittedCount, totalActiveTeams, questionId);
 
             bool allSubmitted = submittedCount >= totalActiveTeams && totalActiveTeams > 0;
 
@@ -89,49 +97,6 @@ namespace TriviaApp.Services
             }
 
             return (isCorrect, allSubmitted);
-        }
-
-        public async Task<bool> SubmitAnswer(int gameId, int teamId, string selectedAnswer)
-        {
-            try
-            {
-                using var connection = new Npgsql.NpgsqlConnection(_context.Database.GetDbConnection().ConnectionString);
-                await connection.OpenAsync();
-
-                using var cmdGetQuestion = new Npgsql.NpgsqlCommand(
-                    "SELECT q.* FROM questions q INNER JOIN games g ON g.current_question_id = q.id WHERE g.id = @gameId", connection);
-                cmdGetQuestion.Parameters.AddWithValue("@gameId", gameId);
-
-                using var reader = await cmdGetQuestion.ExecuteReaderAsync();
-                if (!await reader.ReadAsync())
-                {
-                    _logger.LogWarning("No current question found for game {GameId}", gameId);
-                    return false;
-                }
-
-                var correctAnswer = reader.GetString(reader.GetOrdinal("correct_answer"));
-                var points = reader.GetInt32(reader.GetOrdinal("points"));
-                reader.Close();
-
-                var isCorrect = string.Equals(selectedAnswer, correctAnswer, StringComparison.OrdinalIgnoreCase);
-                var scoreChange = isCorrect ? points : 0;
-
-                using var cmdUpdateScore = new Npgsql.NpgsqlCommand(
-                    "UPDATE gameteams SET score = score + @scoreChange WHERE game_id = @gameId AND team_id = @teamId", connection);
-                cmdUpdateScore.Parameters.AddWithValue("@scoreChange", scoreChange);
-                cmdUpdateScore.Parameters.AddWithValue("@gameId", gameId);
-                cmdUpdateScore.Parameters.AddWithValue("@teamId", teamId);
-
-                await cmdUpdateScore.ExecuteNonQueryAsync();
-
-                _logger.LogInformation("Team {TeamId} submitted answer for game {GameId}. Correct: {IsCorrect}, Points: {Points}", teamId, gameId, isCorrect, scoreChange);
-                return isCorrect;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error submitting answer for game {GameId}, team {TeamId}", gameId, teamId);
-                throw;
-            }
         }
     }
 }

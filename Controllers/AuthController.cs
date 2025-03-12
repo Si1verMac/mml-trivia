@@ -47,7 +47,8 @@ namespace TriviaApp.Controllers
                 var team = new Team
                 {
                     Name = request.Name,
-                    CreatedAt = DateTime.UtcNow
+                    CreatedAt = DateTime.UtcNow,
+                    IsOperator = request.IsOperator // Added for operator distinction
                 };
 
                 team.PasswordHash = _passwordHasher.HashPassword(team, request.Password);
@@ -111,13 +112,20 @@ namespace TriviaApp.Controllers
             var tokenHandler = new JwtSecurityTokenHandler();
             var key = Encoding.UTF8.GetBytes(jwtKey);
 
+            var claims = new List<Claim>
+            {
+                new Claim("teamId", team.Id.ToString()),
+                new Claim("name", team.Name)
+            };
+
+            if (team.IsOperator)
+            {
+                claims.Add(new Claim("role", "operator"));
+            }
+
             var tokenDescriptor = new SecurityTokenDescriptor
             {
-                Subject = new ClaimsIdentity(new[]
-                {
-                    new Claim("teamId", team.Id.ToString()),
-                    new Claim("name", team.Name)
-                }),
+                Subject = new ClaimsIdentity(claims),
                 Expires = DateTime.UtcNow.AddDays(7),
                 Issuer = _configuration["Jwt:Issuer"],
                 Audience = _configuration["Jwt:Audience"],
@@ -133,6 +141,7 @@ namespace TriviaApp.Controllers
     {
         public required string Name { get; set; }
         public required string Password { get; set; }
+        public bool IsOperator { get; set; } // Added for operator registration
     }
 
     public class LoginRequest

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using TriviaApp.Data;
@@ -11,9 +12,11 @@ using TriviaApp.Data;
 namespace TriviaApp.Migrations
 {
     [DbContext(typeof(TriviaDbContext))]
-    partial class TriviaDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250307191350_AddIsOperatorToTeam")]
+    partial class AddIsOperatorToTeam
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -90,14 +93,6 @@ namespace TriviaApp.Migrations
                     b.Property<int>("CurrentQuestionIndex")
                         .HasColumnType("integer")
                         .HasColumnName("currentquestionindex");
-
-                    b.Property<int>("CurrentQuestionNumber")
-                        .HasColumnType("integer")
-                        .HasColumnName("currentquestionnumber");
-
-                    b.Property<int>("CurrentRound")
-                        .HasColumnType("integer")
-                        .HasColumnName("currentround");
 
                     b.Property<DateTime?>("EndedAt")
                         .HasColumnType("timestamp with time zone")

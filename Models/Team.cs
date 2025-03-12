@@ -21,6 +21,9 @@ namespace TriviaApp.Models
   [Column("createdat")]
   public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+  [Column("isoperator")]
+  public bool IsOperator { get; set; } // Added for operator role
+
   public virtual ICollection<GameTeam> GameTeams { get; set; }
 
   public Team()

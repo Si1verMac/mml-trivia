@@ -31,6 +31,11 @@ namespace TriviaApp.Models
   public DateTime? EndedAt { get; set; }
 
   public int CurrentQuestionIndex { get; set; }
+  [Column("currentround")]
+  public int CurrentRound { get; set; } = 1; // Default to 1
+
+  [Column("currentquestionnumber")]
+  public int CurrentQuestionNumber { get; set; } = 1; // Default to 1
 
   // Navigation properties
   public virtual ICollection<GameTeam> GameTeams { get; set; }
@@ -45,6 +50,8 @@ namespace TriviaApp.Models
    GameQuestions = new List<GameQuestion>();
    CreatedAt = DateTime.UtcNow;
    CurrentQuestionIndex = 0;
+   CurrentRound = 1;
+   CurrentQuestionNumber = 1;
   }
  }
 }
