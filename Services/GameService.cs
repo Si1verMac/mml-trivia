@@ -68,7 +68,7 @@ namespace TriviaApp.Services
             }
 
             // Log the current status of the game
-            _logger.LogInformation("Game {GameId} is in state: {Status} with {TeamCount} teams", 
+            _logger.LogInformation("Game {GameId} is in state: {Status} with {TeamCount} teams",
                 gameId, game.Status, game.GameTeams?.Count ?? 0);
 
             // Clear existing GameQuestions if any
@@ -87,11 +87,11 @@ namespace TriviaApp.Services
 
             // Load questions (adjust the number to load as needed)
             var questions = await _context.Questions
-                .OrderBy(q => Guid.NewGuid()) // Randomize the order
+                .OrderBy(q => q.Id) // Randomize the order
                 .Take(Math.Min(10, questionCount)) // Take 10 or all questions if less than 10
                 .ToListAsync();
 
-            _logger.LogInformation("Retrieved {Count} questions for game {GameId}. First question ID: {FirstQuestionId}", 
+            _logger.LogInformation("Retrieved {Count} questions for game {GameId}. First question ID: {FirstQuestionId}",
                 questions.Count, gameId, questions.FirstOrDefault()?.Id ?? 0);
 
             if (!questions.Any())

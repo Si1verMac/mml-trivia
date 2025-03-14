@@ -160,6 +160,17 @@ namespace TriviaApp.Controllers
             }
         }
 
+
+        [HttpGet("all")]
+        public async Task<ActionResult<List<Game>>> GetAllGames()
+        {
+            var games = await _dbContext.Games
+                .Select(g => new { g.Id, g.Name, g.CreatedAt, g.Status })
+                .OrderByDescending(g => g.CreatedAt) // Sort by creation time, most recent first
+                .ToListAsync();
+            return Ok(games);
+        }
+
         [HttpPost("end")]
         public async Task<IActionResult> EndGame([FromBody] EndGameDto dto)
         {

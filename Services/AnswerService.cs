@@ -16,10 +16,12 @@ namespace TriviaApp.Services
     {
         private readonly TriviaDbContext _context;
         private readonly ILogger<AnswerService> _logger;
+        private readonly IHubContext<TriviaHub> _hubContext;
 
-        public AnswerService(TriviaDbContext context, ILogger<AnswerService> logger)
+        public AnswerService(TriviaDbContext context, IHubContext<TriviaHub> hubContext, ILogger<AnswerService> logger)
         {
             _context = context ?? throw new ArgumentNullException(nameof(context));
+            _hubContext = hubContext;
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
@@ -33,8 +35,10 @@ namespace TriviaApp.Services
             {
                 throw new Exception("Question not found");
             }
+            Console.WriteLine(question.CorrectAnswer.Trim(new Char[] { ' ', '"', '.' }) + " Question Correct Answer>>>>>>>>>>>>>>>>>>>>");
+            Console.WriteLine(selectedAnswer.Trim(new Char[] { ' ', '"', '.' }) + " Selected Answer>>>>>>>>>>>>>>");
 
-            bool isCorrect = selectedAnswer != null && selectedAnswer.Trim().Equals(question.CorrectAnswer.Trim(), StringComparison.OrdinalIgnoreCase);
+            bool isCorrect = selectedAnswer != null && selectedAnswer.Trim(new Char[] { ' ', '"', '.' }).Equals(question.CorrectAnswer.Trim(new Char[] { ' ', '"', '.' }), StringComparison.OrdinalIgnoreCase);
 
             // Calculate score change based on wager
             int scoreChange = isCorrect ? wager ?? 0 : -(wager ?? 0); // Add wager if correct, subtract if incorrect
@@ -73,6 +77,13 @@ namespace TriviaApp.Services
             }
 
             await _context.SaveChangesAsync();
+
+            // Fetch and broadcast updated scores
+            // var scores = await _context.GameTeams
+            //     .Where(gt => gt.GameId == gameId)
+            //     .Select(gt => new { gt.TeamId, gt.Score })
+            //     .ToListAsync();
+            // await _hubContext.Clients.Group(gameId.ToString()).SendAsync("ScoresUpdated", scores);
 
 
             int totalActiveTeams = TriviaHub.GetActiveTeamCount(gameId);
