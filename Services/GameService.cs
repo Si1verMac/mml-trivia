@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
@@ -29,9 +30,9 @@ namespace TriviaApp.Services
             {
                 Name = name,
                 Status = "Created",
-                CreatedAt = DateTime.UtcNow, // Automatically set CreatedAt
-                CurrentRound = 1,            // Start at round 1
-                CurrentQuestionNumber = 1    // Start at question 1
+                CreatedAt = DateTime.UtcNow,
+                CurrentRound = 1,
+                CurrentQuestionNumber = 1
             };
 
             _context.Games.Add(game);
@@ -44,141 +45,150 @@ namespace TriviaApp.Services
         {
             _logger.LogInformation("Starting game with ID: {GameId}", gameId);
 
-            var game = await _context.Games
-                .Include(g => g.GameQuestions)
-                .ThenInclude(gq => gq.Question)
-                .FirstOrDefaultAsync(g => g.Id == gameId);
-
-            if (game == null)
+            try
             {
-                _logger.LogError("Game with ID {GameId} not found.", gameId);
-                throw new Exception("Game not found");
-            }
+                var game = await _context.Games
+                    .Include(g => g.GameQuestions)
+                    .ThenInclude(gq => gq.Question)
+                    .FirstOrDefaultAsync(g => g.Id == gameId);
 
-            if (game.Status == "InProgress")
-            {
-                _logger.LogInformation("Game {GameId} is already in progress.", gameId);
+                if (game == null)
+                {
+                    _logger.LogError("Game with ID {GameId} not found.", gameId);
+                    throw new Exception("Game not found");
+                }
+
+                if (game.Status == "InProgress")
+                {
+                    _logger.LogInformation("Game {GameId} is already in progress.", gameId);
+                    return game;
+                }
+
+                if (game.Status != "Created")
+                {
+                    _logger.LogWarning("Game with ID {GameId} cannot be started; it is in '{Status}' state.", gameId, game.Status);
+                    throw new Exception($"Game cannot be started; it is in '{game.Status}' state");
+                }
+
+                _logger.LogInformation("Game {GameId} is in state: {Status} with {TeamCount} teams",
+                    gameId, game.Status, game.GameTeams?.Count ?? 0);
+
+                if (game.GameQuestions.Any())
+                {
+                    _context.GameQuestions.RemoveRange(game.GameQuestions);
+                    await _context.SaveChangesAsync();
+                    game.GameQuestions.Clear();
+                }
+
+                _logger.LogInformation("Fetching questions for game {GameId}...", gameId);
+
+                var questionCount = await _context.Questions.CountAsync();
+                _logger.LogInformation("Found {Count} total questions in database", questionCount);
+
+                if (questionCount < 3)
+                {
+                    _logger.LogError("Not enough questions in database. Found {Count}, need at least 3.", questionCount);
+                    throw new Exception("Not enough questions available to start the game. Need at least 3.");
+                }
+
+                var allQuestions = await _context.Questions.ToListAsync();
+                _logger.LogInformation("Loaded {Count} questions", allQuestions.Count);
+
+                if (allQuestions.Count == 0)
+                {
+                    _logger.LogError("No questions loaded from database.");
+                    throw new Exception("No questions available to start the game.");
+                }
+
+                int totalQuestions = allQuestions.Count;
+                _logger.LogInformation("Planning game with {Count} total questions", totalQuestions);
+
+                var gameQuestions = new List<Question>();
+                foreach (var question in allQuestions)
+                {
+                    gameQuestions.Add(question);
+                    _logger.LogInformation("Adding question {Id}: {Text}", question.Id, question.Text);
+                }
+
+                int order = 1;
+                foreach (var question in gameQuestions)
+                {
+                    var gameQuestion = new GameQuestion
+                    {
+                        GameId = game.Id,
+                        QuestionId = question.Id,
+                        OrderIndex = order++,
+                        IsAnswered = false
+                    };
+                    _context.GameQuestions.Add(gameQuestion);
+                    _logger.LogInformation("Added question {Id} to game {GameId} at position {Order}",
+                        question.Id, gameId, order - 1);
+                }
+
+                await _context.SaveChangesAsync();
+                _logger.LogInformation("Saved {Count} questions to game {GameId}", gameQuestions.Count, gameId);
+
+                game = await _context.Games
+                    .Include(g => g.GameQuestions)
+                    .ThenInclude(gq => gq.Question)
+                    .FirstOrDefaultAsync(g => g.Id == gameId);
+
+                _logger.LogInformation("Loaded {Count} questions for game {GameId}", game.GameQuestions.Count, gameId);
+
+                var firstGameQuestion = game.GameQuestions
+                    .OrderBy(gq => gq.OrderIndex)
+                    .FirstOrDefault();
+
+                if (firstGameQuestion != null)
+                {
+                    game.CurrentQuestionId = firstGameQuestion.QuestionId;
+                    game.CurrentQuestion = firstGameQuestion.Question;
+                    _logger.LogInformation("Set first question for game {GameId}: {QuestionId}",
+                        gameId, firstGameQuestion.QuestionId);
+                }
+                else
+                {
+                    _logger.LogWarning("No questions assigned to game {GameId}.", gameId);
+                    throw new Exception("No questions available to start the game");
+                }
+
+                game.Status = "InProgress";
+                game.StartedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+
+                var gameData = new { GameId = gameId };
+                await _hubContext.Clients.Group(gameId.ToString()).SendAsync("GameStarted", gameData);
+
+                if (game.CurrentQuestion != null)
+                {
+                    var questionData = new
+                    {
+                        Id = game.CurrentQuestion.Id,
+                        Text = game.CurrentQuestion.Text,
+                        Options = game.CurrentQuestion.Options,
+                        Round = game.CurrentRound,
+                        QuestionNumber = game.CurrentQuestionNumber,
+                        QuestionType = game.CurrentQuestion.Type // Include database-driven type
+                    };
+
+                    await _hubContext.Clients.Group(gameId.ToString()).SendAsync("Question", questionData);
+                    _logger.LogInformation("Sent first question for game {GameId}", gameId);
+                }
+
+                _logger.LogInformation("Game {GameId} started successfully.", gameId);
                 return game;
             }
-
-            if (game.Status != "Created")
+            catch (Exception ex)
             {
-                _logger.LogWarning("Game with ID {GameId} cannot be started; it is in '{Status}' state.", gameId, game.Status);
-                throw new Exception($"Game cannot be started; it is in '{game.Status}' state");
+                _logger.LogError(ex, "Error starting game {GameId}: {Message}", gameId, ex.Message);
+                throw;
             }
-
-            // Log the current status of the game
-            _logger.LogInformation("Game {GameId} is in state: {Status} with {TeamCount} teams",
-                gameId, game.Status, game.GameTeams?.Count ?? 0);
-
-            // Clear existing GameQuestions if any
-            if (game.GameQuestions.Any())
-            {
-                _context.GameQuestions.RemoveRange(game.GameQuestions);
-                await _context.SaveChangesAsync();
-                game.GameQuestions.Clear();
-            }
-
-            _logger.LogInformation("Fetching questions for game {GameId}...", gameId);
-
-            // Count questions in the database
-            var questionCount = await _context.Questions.CountAsync();
-            _logger.LogInformation("Found {Count} total questions in database", questionCount);
-
-            // Load questions (adjust the number to load as needed)
-            var questions = await _context.Questions
-                .OrderBy(q => q.Id) // Randomize the order
-                .Take(Math.Min(10, questionCount)) // Take 10 or all questions if less than 10
-                .ToListAsync();
-
-            _logger.LogInformation("Retrieved {Count} questions for game {GameId}. First question ID: {FirstQuestionId}",
-                questions.Count, gameId, questions.FirstOrDefault()?.Id ?? 0);
-
-            if (!questions.Any())
-            {
-                _logger.LogWarning("No questions available to start game {GameId}.", gameId);
-                throw new Exception("No questions available to start the game");
-            }
-
-            _logger.LogInformation("Adding {Count} questions to game {GameId}...", questions.Count, gameId);
-
-            int order = 1;
-            foreach (var q in questions)
-            {
-                _logger.LogDebug("Adding question ID {QuestionId}: {QuestionText}", q.Id, q.Text);
-                var gameQuestion = new GameQuestion
-                {
-                    GameId = game.Id,
-                    QuestionId = q.Id,
-                    OrderIndex = order++,
-                    IsAnswered = false
-                };
-                _context.GameQuestions.Add(gameQuestion);
-                _logger.LogDebug("Added question {QuestionId} to game {GameId}, order {Order}", q.Id, gameId, order - 1);
-            }
-            await _context.SaveChangesAsync();
-
-            // Reload game with updated questions
-            game = await _context.Games
-                .Include(g => g.GameQuestions)
-                .ThenInclude(gq => gq.Question)
-                .FirstOrDefaultAsync(g => g.Id == gameId);
-
-            _logger.LogInformation("Loaded {Count} questions for game {GameId}", game.GameQuestions.Count, gameId);
-
-            var firstGameQuestion = game.GameQuestions
-                .Where(gq => !gq.IsAnswered)
-                .OrderBy(gq => gq.OrderIndex)
-                .FirstOrDefault();
-
-            if (firstGameQuestion != null)
-            {
-                game.CurrentQuestionId = firstGameQuestion.QuestionId;
-                game.CurrentQuestion = firstGameQuestion.Question;
-                _logger.LogInformation("Set first question for game {GameId}: {QuestionId}",
-                    gameId, firstGameQuestion.QuestionId);
-            }
-            else
-            {
-                _logger.LogWarning("No questions assigned to game {GameId}.", gameId);
-                throw new Exception("No questions available to start the game");
-            }
-
-            game.Status = "InProgress";
-            game.StartedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
-
-            // Broadcast to all clients that the game started - use PascalCase
-            var gameData = new { gameId };
-            await _hubContext.Clients.Group(gameId.ToString()).SendAsync("GameStarted", gameData);
-
-            // Also send the first question
-            if (game.CurrentQuestion != null)
-            {
-                // Include round & questionNumber if you want to display them immediately
-                var questionData = new
-                {
-                    id = game.CurrentQuestion.Id,
-                    text = game.CurrentQuestion.Text,
-                    options = game.CurrentQuestion.Options,
-                    round = game.CurrentRound,
-                    questionNumber = game.CurrentQuestionNumber
-                };
-
-                // Use PascalCase for Question as expected by the frontend
-                await _hubContext.Clients.Group(gameId.ToString()).SendAsync("Question", questionData);
-
-                _logger.LogInformation("Sent first question for game {GameId}", gameId);
-            }
-
-            _logger.LogInformation("Game {GameId} started successfully.", gameId);
-            return game;
         }
 
         public async Task<Game> GetOrCreateOpenGameAsync()
         {
             var openGame = await _context.Games
-                .Where(g => g.Status == "Created" && g.CreatedAt > DateTime.UtcNow.AddMinutes(-5)) // 5-minute window
+                .Where(g => g.Status == "Created" && g.CreatedAt > DateTime.UtcNow.AddMinutes(-5))
                 .OrderByDescending(g => g.CreatedAt)
                 .FirstOrDefaultAsync();
 
@@ -221,89 +231,203 @@ namespace TriviaApp.Services
 
         public async Task<Game> AdvanceToNextQuestionAsync(int gameId)
         {
-            var game = await _context.Games
-                .Include(g => g.GameQuestions)
-                .ThenInclude(gq => gq.Question)
-                .FirstOrDefaultAsync(g => g.Id == gameId);
-
-            if (game == null)
-                throw new Exception($"Game {gameId} not found.");
-
-            if (game.Status != "InProgress")
-                throw new Exception("Game is not in progress.");
-
-            // Mark the current question as answered (if not already)
-            var currentGQ = game.GameQuestions
-                .FirstOrDefault(gq => gq.QuestionId == game.CurrentQuestionId && !gq.IsAnswered);
-            if (currentGQ != null)
+            try
             {
-                currentGQ.IsAnswered = true;
-            }
+                _logger.LogInformation("Advancing to next question for game {GameId}", gameId);
 
-            // Find the next unanswered question
-            var nextGQ = game.GameQuestions
-                .Where(gq => !gq.IsAnswered)
-                .OrderBy(gq => gq.OrderIndex)
-                .FirstOrDefault();
+                var game = await _context.Games
+                    .Include(g => g.GameQuestions)
+                    .ThenInclude(gq => gq.Question)
+                    .FirstOrDefaultAsync(g => g.Id == gameId);
 
-            if (nextGQ != null)
-            {
-                // Example logic: every 3 questions => increment round
-                if (game.CurrentQuestionNumber >= 3)
+                if (game == null)
                 {
-                    game.CurrentRound++;
-                    game.CurrentQuestionNumber = 1;
+                    _logger.LogError("Game {GameId} not found", gameId);
+                    throw new Exception($"Game {gameId} not found.");
+                }
+
+                if (game.Status != "InProgress")
+                {
+                    _logger.LogWarning("Game {GameId} is not in progress. Current status: {Status}", gameId, game.Status);
+                    throw new Exception("Game is not in progress.");
+                }
+
+                var currentGQ = game.GameQuestions
+                    .FirstOrDefault(gq => gq.QuestionId == game.CurrentQuestionId);
+                if (currentGQ != null)
+                {
+                    currentGQ.IsAnswered = true;
+                    _logger.LogInformation("Marked question {QuestionId} as answered", currentGQ.QuestionId);
                 }
                 else
                 {
-                    game.CurrentQuestionNumber++;
+                    _logger.LogWarning("Current question not found for game {GameId}", gameId);
                 }
 
-                // Update the current question pointer
-                game.CurrentQuestionId = nextGQ.QuestionId;
+                var allGameQuestions = game.GameQuestions
+                    .OrderBy(gq => gq.OrderIndex)
+                    .ToList();
 
-                await _context.SaveChangesAsync();
-
-                // Now broadcast the next question, including round & questionNumber
-                var questionData = new
+                int currentIndex = -1;
+                if (currentGQ != null)
                 {
-                    id = nextGQ.Question.Id,
-                    text = nextGQ.Question.Text,
-                    options = nextGQ.Question.Options,
-                    round = game.CurrentRound,
-                    questionNumber = game.CurrentQuestionNumber
-                };
+                    currentIndex = allGameQuestions.FindIndex(gq => gq.QuestionId == currentGQ.QuestionId);
+                    _logger.LogInformation("Current question index: {Index} of {Total}", currentIndex, allGameQuestions.Count);
+                }
 
-                // Use PascalCase for Question as expected by frontend
-                await _hubContext.Clients.Group(gameId.ToString()).SendAsync("Question", questionData);
+                GameQuestion nextGQ = null;
+                if (currentIndex >= 0 && currentIndex < allGameQuestions.Count - 1)
+                {
+                    nextGQ = allGameQuestions[currentIndex + 1];
+                    _logger.LogInformation("Found next question at index {Index}: {QuestionId}",
+                        currentIndex + 1, nextGQ.QuestionId);
+                }
 
-                return game;
+                if (nextGQ != null)
+                {
+                    // Use the database-driven question type
+                    string questionType = nextGQ.Question.Type?.ToLowerInvariant() ?? "regular";
+                    _logger.LogInformation("Determined question type for next question {QuestionId}: {QuestionType}",
+                        nextGQ.QuestionId, questionType);
+
+                    // Update round and question number based on question type or progression
+                    switch (questionType)
+                    {
+                        case "lightning":
+                            game.CurrentRound = 4;
+                            game.CurrentQuestionNumber = 1;
+                            _logger.LogInformation("Moving to Lightning Bonus Question");
+                            break;
+                        case "halftimebonus":
+                        case "halftime_bonus":
+                        case "halftime-bonus":
+                        case "halftimeBonus":
+                            game.CurrentRound = 4;
+                            game.CurrentQuestionNumber = 2;
+                            _logger.LogInformation("Moving to Halftime Bonus Round");
+                            break;
+                        case "halftimebreak":
+                        case "halftime_break":
+                        case "halftime-break":
+                        case "halftimeBreak":
+                            game.CurrentRound = 4;
+                            game.CurrentQuestionNumber = 3;
+                            _logger.LogInformation("Moving to Halftime Break");
+                            break;
+                        case "multiquestion":
+                        case "multiquestions":
+                        case "multi-question":
+                        case "multi_question":
+                        case "multi question":
+                        case "multiQuestion":
+                            game.CurrentRound = 5;
+                            game.CurrentQuestionNumber = 1;
+                            _logger.LogInformation("Moving to Multi-Question Round (Round 5)");
+                            break;
+                        case "finalwager":
+                        case "final-wager":
+                        case "final_wager":
+                        case "final":
+                            game.CurrentRound = 8;
+                            game.CurrentQuestionNumber = 1;
+                            _logger.LogInformation("Moving to Final Wager Question");
+                            break;
+                        default: // "regular" or unrecognized type
+                            // Check if we're advancing after Round 5 multiQuestion
+                            if (game.CurrentRound == 5 && currentGQ?.Question?.Type?.ToLowerInvariant()?.Contains("multi") == true)
+                            {
+                                // Force advancement to Round 6 after multiQuestion
+                                game.CurrentRound = 6;
+                                game.CurrentQuestionNumber = 1;
+                                _logger.LogInformation("Advancing to Round 6 after completing Multi-Question round");
+                            }
+                            // Check if it's a multi-question using contains checks
+                            else if (questionType.Contains("multi") && (questionType.Contains("question") || questionType.Contains("round") || questionType.Contains("5")))
+                            {
+                                _logger.LogInformation("Detected multi-question via string matching: {QuestionType}", questionType);
+                                game.CurrentRound = 5;
+                                game.CurrentQuestionNumber = 1;
+                                _logger.LogInformation("Moving to Multi-Question Round (Round 5) via pattern matching");
+                            }
+                            else if (currentIndex == -1) // First question
+                            {
+                                game.CurrentRound = 1;
+                                game.CurrentQuestionNumber = 1;
+                            }
+                            else if (game.CurrentQuestionNumber >= 3) // End of a round
+                            {
+                                game.CurrentRound++;
+                                game.CurrentQuestionNumber = 1;
+                                _logger.LogInformation("Moving to Round {Round}", game.CurrentRound);
+                            }
+                            else
+                            {
+                                game.CurrentQuestionNumber++;
+                                _logger.LogInformation("Moving to Question {Round}.{Number}",
+                                    game.CurrentRound, game.CurrentQuestionNumber);
+                            }
+                            // Don't override the questionType for unrecognized types,
+                            // instead let the client determine what to do with it
+                            if (questionType == "regular")
+                            {
+                                // Only override for actually regular questions
+                                questionType = "regular";
+                            }
+                            break;
+                    }
+
+                    game.CurrentQuestionId = nextGQ.QuestionId;
+                    await _context.SaveChangesAsync();
+
+                    var questionData = new
+                    {
+                        Id = nextGQ.Question.Id,
+                        Text = nextGQ.Question.Text,
+                        Options = nextGQ.Question.Options,
+                        Round = game.CurrentRound,
+                        QuestionNumber = game.CurrentQuestionNumber,
+                        QuestionType = nextGQ.Question.Type // Use database type directly
+                    };
+
+                    await _hubContext.Clients.Group(gameId.ToString()).SendAsync("Question", questionData);
+                    _logger.LogInformation("Sent next question data: {Type} for round {Round}.{Number}",
+                        questionType, game.CurrentRound, game.CurrentQuestionNumber);
+
+                    return game;
+                }
+                else
+                {
+                    _logger.LogWarning("No more questions for game {GameId}. Total: {Total}, Current: {Current}",
+                        gameId, allGameQuestions.Count, currentIndex);
+
+                    game.Status = "Completed";
+                    game.EndedAt = DateTime.UtcNow;
+                    await _context.SaveChangesAsync();
+
+                    await _hubContext.Clients.Group(gameId.ToString()).SendAsync("GameEnded");
+                    _logger.LogInformation("Game {GameId} ended - no more questions", gameId);
+
+                    return game;
+                }
             }
-            else
+            catch (Exception ex)
             {
-                // No more questions, end the game
-                game.Status = "Completed";
-                game.EndedAt = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
-
-                // Broadcast game ended event - use PascalCase for frontend
-                await _hubContext.Clients.Group(gameId.ToString()).SendAsync("GameEnded");
-
-                return game;
+                _logger.LogError(ex, "Error advancing to next question for game {GameId}: {Message}",
+                    gameId, ex.Message);
+                throw;
             }
         }
 
         public async Task TriggerTimerExpiry(int gameId, int questionId)
         {
-            // Use PascalCase as expected by frontend
             await _hubContext.Clients.Group(gameId.ToString()).SendAsync("TimerExpired");
             await _hubContext.Clients.All.SendAsync("HandleTimerExpiry", gameId, questionId);
         }
+
         public async Task<Game> EndGameAsync(int gameId)
         {
             _logger.LogInformation("Ending game with ID: {GameId}", gameId);
 
-            // Retrieve the game from the database
             var game = await _context.Games
                 .Include(g => g.GameQuestions)
                 .FirstOrDefaultAsync(g => g.Id == gameId);
@@ -314,21 +438,17 @@ namespace TriviaApp.Services
                 throw new Exception("Game not found");
             }
 
-            // Check if the game is in the correct state
             if (game.Status != "InProgress")
             {
                 _logger.LogWarning("Game with ID {GameId} cannot be ended; it is not in 'InProgress' state.", gameId);
                 throw new Exception("Game cannot be ended; it is not in 'InProgress' state");
             }
 
-            // Mark as completed
             game.Status = "Completed";
             game.EndedAt = DateTime.UtcNow;
 
             _logger.LogInformation("Resetting question status for game {GameId}...", gameId);
 
-            // Reset all the question status for this game, so they can be reused
-            // THIS IS THE FIX: reset all IsAnswered flags to false
             int resetCount = 0;
             foreach (var gameQuestion in game.GameQuestions)
             {
@@ -338,12 +458,9 @@ namespace TriviaApp.Services
 
             _logger.LogInformation("Reset {Count} questions for game {GameId}", resetCount, gameId);
 
-            // Save changes
             await _context.SaveChangesAsync();
 
-            // Broadcast game ended event - use PascalCase for frontend
             await _hubContext.Clients.Group(gameId.ToString()).SendAsync("GameEnded");
-
             _logger.LogInformation("Game {GameId} ended successfully", gameId);
 
             return game;

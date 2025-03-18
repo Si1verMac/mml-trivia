@@ -1,4 +1,7 @@
+using System.Linq;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using TriviaApp.Models;
 
 namespace TriviaApp.Data
@@ -91,6 +94,68 @@ namespace TriviaApp.Data
                 .WithMany()
                 .HasForeignKey(g => g.CurrentQuestionId)
                 .IsRequired(false);
+
+            // Configure the Question entity to handle JSON conversions
+            modelBuilder.Entity<Question>(entity =>
+            {
+                // Value comparer for string arrays
+                var stringArrayComparer = new ValueComparer<string[]>(
+                    (a, b) => a != null && b != null && a.SequenceEqual(b),
+                    c => c == null ? 0 : c.Aggregate(0, (a, v) => HashCode.Combine(a, v != null ? v.GetHashCode() : 0)),
+                    c => c.ToArray()
+                );
+
+                // Set up JSON conversion for Text field
+                entity.Property(e => e.Text)
+                    .HasConversion(
+                        v => JsonSerializer.Serialize(v, new JsonSerializerOptions()),
+                        v => JsonDeserialize<string[]>(v) ?? Array.Empty<string>()
+                    )
+                    .Metadata.SetValueComparer(stringArrayComparer);
+
+                // Set up JSON conversion for Options field
+                entity.Property(e => e.Options)
+                    .HasConversion(
+                        v => JsonSerializer.Serialize(v, new JsonSerializerOptions()),
+                        v => JsonDeserialize<string[]>(v) ?? Array.Empty<string>()
+                    )
+                    .Metadata.SetValueComparer(stringArrayComparer);
+
+                // Set up JSON conversion for CorrectAnswer field
+                entity.Property(e => e.CorrectAnswer)
+                    .HasConversion(
+                        v => JsonSerializer.Serialize(v, new JsonSerializerOptions()),
+                        v => JsonDeserialize<string[]>(v) ?? Array.Empty<string>()
+                    )
+                    .Metadata.SetValueComparer(stringArrayComparer);
+            });
+        }
+
+        // Helper method to safely deserialize JSON
+        private static T JsonDeserialize<T>(string json)
+        {
+            if (string.IsNullOrEmpty(json))
+                return default;
+
+            try
+            {
+                // If it's a string that isn't JSON formatted, wrap it in an array
+                if (!json.StartsWith("[") && typeof(T) == typeof(string[]))
+                {
+                    return (T)(object)new string[] { json };
+                }
+
+                return JsonSerializer.Deserialize<T>(json);
+            }
+            catch
+            {
+                // If deserialization fails and we want string[], return the raw string as a single-element array
+                if (typeof(T) == typeof(string[]))
+                {
+                    return (T)(object)new string[] { json };
+                }
+                return default;
+            }
         }
     }
 }

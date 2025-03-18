@@ -26,14 +26,14 @@ namespace TriviaApp.Hubs
     private static readonly Dictionary<int, HashSet<int>> _teamsReadyForNext = new();
     private static readonly Dictionary<int, Dictionary<int, string>> _teamSubmissions = new();
     private static readonly Dictionary<string, DateTime> _lastGameStateRequest = new();
-    private static readonly TimeSpan _gameStateRequestThrottle = TimeSpan.FromSeconds(1); // Only allow one request per second per connection
+    private static readonly TimeSpan _gameStateRequestThrottle = TimeSpan.FromSeconds(1);
 
     public TriviaHub(
-    QuestionService questionService,
-    AnswerService answerService,
-    TriviaDbContext dbContext,
-    GameService gameService,
-    ILogger<TriviaHub> logger)
+        QuestionService questionService,
+        AnswerService answerService,
+        TriviaDbContext dbContext,
+        GameService gameService,
+        ILogger<TriviaHub> logger)
     {
       _questionService = questionService;
       _answerService = answerService;
@@ -55,9 +55,8 @@ namespace TriviaApp.Hubs
       try
       {
         _logger.LogInformation("Processing JoinGame request for team {TeamId} in game {GameId}, connection {ConnectionId}",
-          teamId, gameId, Context.ConnectionId);
+            teamId, gameId, Context.ConnectionId);
 
-        // Check if this connection is already mapped to this exact game and team
         bool alreadyJoined = false;
         lock (_connectionMappings)
         {
@@ -66,13 +65,12 @@ namespace TriviaApp.Hubs
             if (mapping.gameId == gameId && mapping.teamId == teamId)
             {
               _logger.LogInformation("Connection {ConnectionId} already joined for team {TeamId} in game {GameId}, skipping duplicate join",
-                          Context.ConnectionId, teamId, gameId);
+                  Context.ConnectionId, teamId, gameId);
               alreadyJoined = true;
             }
           }
         }
 
-        // If not already in the right group, add to it
         if (!alreadyJoined)
         {
           await Groups.AddToGroupAsync(Context.ConnectionId, gameId.ToString());
@@ -89,25 +87,23 @@ namespace TriviaApp.Hubs
             _connectionMappings[Context.ConnectionId] = (gameId, teamId);
           }
 
-          // Send with PascalCase as expected by frontend
-          await Clients.Group(gameId.ToString()).SendAsync("TeamJoined", new { gameId, teamId });
+          await Clients.Group(gameId.ToString()).SendAsync("TeamJoined", new { GameId = gameId, TeamId = teamId });
         }
 
         var game = await _dbContext.Games
-          .Include(g => g.CurrentQuestion)
-          .FirstOrDefaultAsync(g => g.Id == gameId);
+            .Include(g => g.CurrentQuestion)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
 
-        // Always send the game state so client knows what's happening
         if (game != null)
         {
           _logger.LogInformation("Sending GameState for game {GameId} to team {TeamId}: Status={Status}",
-            gameId, teamId, game.Status);
+              gameId, teamId, game.Status);
 
           await Clients.Caller.SendAsync("GameState", new
           {
-            gameId = game.Id,
-            status = game.Status,
-            name = game.Name
+            GameId = game.Id,
+            Status = game.Status,
+            Name = game.Name
           });
         }
         else
@@ -116,108 +112,84 @@ namespace TriviaApp.Hubs
           return;
         }
 
-        // Only proceed if game is in progress and has a current question
         if (game.Status == "InProgress" && game.CurrentQuestion != null)
         {
-          // Check if this team has already answered the current question
           bool hasAnswered = false;
 
           if (game.CurrentQuestionId.HasValue)
           {
             hasAnswered = await _dbContext.Answers
-              .AnyAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == game.CurrentQuestionId);
+                .AnyAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == game.CurrentQuestionId);
 
             _logger.LogInformation("Team {TeamId} joining game {GameId} - has already answered current question {QuestionId}: {HasAnswered}",
-              teamId, gameId, game.CurrentQuestionId, hasAnswered);
+                teamId, gameId, game.CurrentQuestionId, hasAnswered);
 
-            // Check if ALL teams have submitted answers - this is critical for deciding the sequence
             int totalActiveTeams = GetActiveTeamCount(gameId);
             int submittedCount = await _dbContext.Answers
-              .Where(a => a.GameId == gameId && a.QuestionId == game.CurrentQuestionId)
-              .Select(a => a.TeamId)
-              .Distinct()
-              .CountAsync();
+                .Where(a => a.GameId == gameId && a.QuestionId == game.CurrentQuestionId)
+                .Select(a => a.TeamId)
+                .Distinct()
+                .CountAsync();
 
             bool allTeamsSubmitted = submittedCount >= totalActiveTeams && totalActiveTeams > 0;
 
-            // First, decide what events to send and in what order
-            bool sendQuestion = true;      // Should we send Question event?
-            bool sendAnswerSubmitted = hasAnswered;  // Should we send AnswerSubmitted event?
-            bool sendDisplayAnswer = false;   // Should we send DisplayAnswer event?
+            bool sendQuestion = true;
+            bool sendAnswerSubmitted = hasAnswered;
+            bool sendDisplayAnswer = false;
 
             _logger.LogInformation("Game {GameId}, question {QuestionId}: {SubmittedCount}/{TotalActiveTeams} teams have submitted answers",
-              gameId, game.CurrentQuestionId, submittedCount, totalActiveTeams);
+                gameId, game.CurrentQuestionId, submittedCount, totalActiveTeams);
 
-            // All teams have answered - send DisplayAnswer instead of Question for already-answered teams
             if (allTeamsSubmitted)
             {
               _logger.LogInformation("All teams have answered question {QuestionId} in game {GameId} - sending DisplayAnswer for reconnection",
-                game.CurrentQuestionId, gameId);
-
+                  game.CurrentQuestionId, gameId);
               sendDisplayAnswer = true;
-
-              // If we're showing the answer, don't send the question - client can handle this
-              if (hasAnswered)
-              {
-                sendQuestion = false;
-              }
-            }
-            else if (hasAnswered)
-            {
-              _logger.LogInformation("Team {TeamId} already answered but not all teams have - ensuring proper phase through event sequence",
-                teamId);
+              if (hasAnswered) sendQuestion = false;
             }
 
-            // Now send the events in the right order based on our decision
-
-            // 1. First send the question if needed (so client has context)
             if (sendQuestion)
             {
               _logger.LogInformation("Sending Question event to team {TeamId} for question {QuestionId}",
-                teamId, game.CurrentQuestionId);
+                  teamId, game.CurrentQuestionId);
 
               var questionData = new
               {
-                id = game.CurrentQuestion.Id,
-                text = game.CurrentQuestion.Text,
-                options = game.CurrentQuestion.Options,
-                round = game.CurrentRound,
-                questionNumber = game.CurrentQuestionNumber
+                Id = game.CurrentQuestion.Id,
+                Text = game.CurrentQuestion.Text,
+                Options = game.CurrentQuestion.Options,
+                Round = game.CurrentRound,
+                QuestionNumber = game.CurrentQuestionNumber,
+                QuestionType = game.CurrentQuestion.Type // Added for client-side component rendering
               };
 
               await Clients.Caller.SendAsync("Question", questionData);
             }
 
-            // 2. If they've answered, send the AnswerSubmitted event 
             if (sendAnswerSubmitted)
             {
               _logger.LogInformation("Sending AnswerSubmitted event to team {TeamId} for question {QuestionId}",
-                teamId, game.CurrentQuestionId);
-
-              await Clients.Caller.SendAsync("AnswerSubmitted", new { teamId, isCorrect = true });
+                  teamId, game.CurrentQuestionId);
+              await Clients.Caller.SendAsync("AnswerSubmitted", new { TeamId = teamId, IsCorrect = true });
             }
 
-            // 3. Finally, send DisplayAnswer if all teams have answered
             if (sendDisplayAnswer)
             {
               _logger.LogInformation("Sending DisplayAnswer to team {TeamId} for question {QuestionId}, answer: {Answer}",
-                teamId, game.CurrentQuestionId, game.CurrentQuestion.CorrectAnswer);
-
+                  teamId, game.CurrentQuestionId, game.CurrentQuestion.CorrectAnswer);
               await Clients.Caller.SendAsync("DisplayAnswer", game.CurrentQuestionId, game.CurrentQuestion.CorrectAnswer);
 
-              // Check if this team has signaled ready before the reconnection
               bool hasExplicitlySignaledReady = false;
               lock (_teamsReadyForNext)
               {
                 hasExplicitlySignaledReady = _teamsReadyForNext.ContainsKey(gameId) &&
-                                           _teamsReadyForNext[gameId].Contains(teamId);
+                                            _teamsReadyForNext[gameId].Contains(teamId);
               }
 
-              // Only send ready signal if they've clicked ready 
               if (hasExplicitlySignaledReady)
               {
                 _logger.LogInformation("Team {TeamId} previously clicked ready for game {GameId}, sending TeamSignaledReady",
-                  teamId, gameId);
+                    teamId, gameId);
                 await Clients.Caller.SendAsync("TeamSignaledReady", teamId);
               }
             }
@@ -235,9 +207,8 @@ namespace TriviaApp.Hubs
     {
       try
       {
-        _logger.LogInformation("Team {TeamId} submitted wager {Wager} for game {GameId}, question {QuestionId}", teamId, wager, gameId, questionId);
-        // Example: Save to database or update game state
-        // Optionally broadcast to clients if needed
+        _logger.LogInformation("Team {TeamId} submitted wager {Wager} for game {GameId}, question {QuestionId}",
+            teamId, wager, gameId, questionId);
         await Clients.Group($"Game_{gameId}").SendAsync("WagerSubmitted", teamId, wager);
       }
       catch (Exception ex)
@@ -265,12 +236,14 @@ namespace TriviaApp.Hubs
     {
       try
       {
-        // Record the start time for performance logging
         var startTime = DateTime.UtcNow;
         _logger.LogInformation("Starting SubmitAnswer processing for team {TeamId}, game {GameId}, question {QuestionId}",
-          teamId, gameId, questionId);
+            teamId, gameId, questionId);
 
-        var (isCorrect, allSubmitted) = await _answerService.SubmitAnswerAsync(gameId, teamId, questionId, selectedAnswer, wager);
+        var question = await _dbContext.Questions.FindAsync(questionId);
+        _logger.LogInformation("Submitting answer for question type: {QuestionType}", question?.Type);
+
+        var (isCorrect, allSubmitted, scoreChange) = await _answerService.SubmitAnswerAsync(gameId, teamId, questionId, selectedAnswer, wager);
 
         lock (_teamSubmissions)
         {
@@ -279,47 +252,33 @@ namespace TriviaApp.Hubs
           _teamSubmissions[gameId][teamId] = selectedAnswer;
         }
 
-        // Use PascalCase for AnswerSubmitted as expected by frontend
-        await Clients.Caller.SendAsync("AnswerSubmitted", new { teamId, isCorrect });
+        await Clients.Caller.SendAsync("AnswerSubmitted", new { TeamId = teamId, IsCorrect = isCorrect, Points = scoreChange });
 
-        if (allSubmitted)
+        if (allSubmitted && question != null)
         {
-          var question = await _dbContext.Questions.FindAsync(questionId);
-          if (question != null)
-          {
-            _logger.LogInformation("All teams submitted for game {GameId}, question {QuestionId}. Sending DisplayAnswer.", gameId, questionId);
+          _logger.LogInformation("All teams submitted for game {GameId}, question {QuestionId}. Sending DisplayAnswer.",
+              gameId, questionId);
+          await Task.Delay(500);
+          await Clients.Group(gameId.ToString()).SendAsync("DisplayAnswer", questionId, question.CorrectAnswer);
+          await Clients.Caller.SendAsync("DisplayAnswer", questionId, question.CorrectAnswer, isCorrect, wager, scoreChange);
 
-            // Add a small delay before sending DisplayAnswer to ensure the last submitting team has time to process their state change
-            await Task.Delay(500);
-
-            // Send to all clients including the one that just submitted
-            _logger.LogInformation("Sending DisplayAnswer to all clients in game {GameId}", gameId);
-            await Clients.Group(gameId.ToString()).SendAsync("DisplayAnswer", questionId, question.CorrectAnswer);
-
-            // Also send directly to the caller to ensure they get it
-            _logger.LogInformation("Sending additional DisplayAnswer directly to caller (Team {TeamId})", teamId);
-            await Clients.Caller.SendAsync("DisplayAnswer", questionId, question.CorrectAnswer, isCorrect, wager);
-          }
           lock (_teamSubmissions)
           {
             _teamSubmissions.Remove(gameId);
           }
         }
 
-        // Broadcast updated scores to operators - but be more efficient
-        // Only send scores once the answer is fully processed
         var scores = await _dbContext.GameTeams
-          .Where(gt => gt.GameId == gameId)
-          .Select(gt => new { gt.TeamId, gt.Score })
-          .ToListAsync();
+            .Where(gt => gt.GameId == gameId)
+            .Select(gt => new { gt.TeamId, gt.Score })
+            .ToListAsync();
 
         _logger.LogInformation("Broadcasting updated scores to operators for game {GameId}", gameId);
         await Clients.Group("Operators").SendAsync("ScoresUpdated", gameId, scores);
 
-        // Log the total time taken to process this request
         var totalTime = DateTime.UtcNow - startTime;
         _logger.LogInformation("Completed SubmitAnswer in {TotalMs}ms for team {TeamId}, game {GameId}",
-          totalTime.TotalMilliseconds, teamId, gameId);
+            totalTime.TotalMilliseconds, teamId, gameId);
       }
       catch (Exception ex)
       {
@@ -333,6 +292,70 @@ namespace TriviaApp.Hubs
       try
       {
         _logger.LogInformation("HandleTimerExpiry called for game {GameId}, question {QuestionId}", gameId, questionId);
+
+        // Get the current game to check if it's a halftime break
+        var game = await _dbContext.Games
+            .Include(g => g.CurrentQuestion)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
+
+        if (game == null)
+        {
+          _logger.LogWarning("HandleTimerExpiry: Game {GameId} not found", gameId);
+          return;
+        }
+
+        if (game.CurrentQuestion == null)
+        {
+          _logger.LogWarning("HandleTimerExpiry: Current question is null for game {GameId}", gameId);
+          return;
+        }
+
+        string questionType = game.CurrentQuestion.Type?.ToLowerInvariant() ?? "";
+        _logger.LogInformation("HandleTimerExpiry: Question type is '{QuestionType}' for game {GameId}",
+            questionType, gameId);
+
+        // Check if this is a halftime break expiry (with more robust type checking)
+        bool isHalftimeBreak = questionType == "halftimebreak" ||
+                              questionType == "halftime_break" ||
+                              questionType == "halftime-break" ||
+                              questionType == "halftime break" ||
+                              questionType.Contains("halftime") && questionType.Contains("break");
+
+        if (isHalftimeBreak)
+        {
+          _logger.LogInformation("HandleTimerExpiry detected halftime break for game {GameId}", gameId);
+
+          // Mark all teams as ready to advance from halftime break
+          lock (_teamsReadyForNext)
+          {
+            if (!_teamsReadyForNext.ContainsKey(gameId))
+            {
+              _teamsReadyForNext[gameId] = new HashSet<int>();
+            }
+
+            // Get all active teams for this game
+            lock (_activeTeams)
+            {
+              if (_activeTeams.ContainsKey(gameId))
+              {
+                foreach (var teamId in _activeTeams[gameId])
+                {
+                  _teamsReadyForNext[gameId].Add(teamId);
+                  _logger.LogInformation("Auto-signaling team {TeamId} as ready after halftime break expiry", teamId);
+                }
+              }
+            }
+          }
+
+          // Notify all clients that the halftime break timer has expired
+          await Clients.Group(gameId.ToString()).SendAsync("HalftimeBreakExpired");
+
+          // Advance to next question automatically
+          _logger.LogInformation("Advancing to next question after halftime break timer expiry for game {GameId}", gameId);
+          await _gameService.AdvanceToNextQuestionAsync(gameId);
+          return;
+        }
+
         HashSet<int> activeTeams;
         lock (_activeTeams)
         {
@@ -350,7 +373,8 @@ namespace TriviaApp.Hubs
         }
 
         var nonSubmittedTeams = activeTeams.Except(submittedTeams).ToList();
-        _logger.LogInformation("Teams that haven't submitted for game {GameId}: {NonSubmittedTeams}", gameId, string.Join(", ", nonSubmittedTeams));
+        _logger.LogInformation("Teams that haven't submitted for game {GameId}: {NonSubmittedTeams}",
+            gameId, string.Join(", ", nonSubmittedTeams));
 
         var question = await _dbContext.Questions.FindAsync(questionId);
         if (question == null)
@@ -370,10 +394,10 @@ namespace TriviaApp.Hubs
 
         int totalActiveTeams = GetActiveTeamCount(gameId);
         int submittedCount = await _dbContext.Answers
-        .Where(a => a.GameId == gameId && a.QuestionId == questionId)
-        .Select(a => a.TeamId)
-        .Distinct()
-        .CountAsync();
+            .Where(a => a.GameId == gameId && a.QuestionId == questionId)
+            .Select(a => a.TeamId)
+            .Distinct()
+            .CountAsync();
 
         if (submittedCount >= totalActiveTeams && totalActiveTeams > 0)
         {
@@ -391,26 +415,19 @@ namespace TriviaApp.Hubs
     {
       try
       {
-        // IMPORTANT: This method should ONLY be called when a user explicitly clicks the "Ready" button
-        // We track which teams have signaled ready in this dictionary, so it's critical that we only
-        // add a team here when they've actually pressed the button, not through any automatic process
         _logger.LogInformation("Team {TeamId} explicitly signaled ready (button clicked) for game {GameId}", teamId, gameId);
 
         bool needToBroadcast = false;
-
         lock (_teamsReadyForNext)
         {
           if (!_teamsReadyForNext.ContainsKey(gameId))
             _teamsReadyForNext[gameId] = new HashSet<int>();
 
-          // Only add the team if they're not already in the ready list
           if (!_teamsReadyForNext[gameId].Contains(teamId))
           {
             _teamsReadyForNext[gameId].Add(teamId);
             _logger.LogInformation("Team {TeamId} signaled ready for game {GameId}. Ready teams: {ReadyCount}/{TotalActive}",
-              teamId, gameId, _teamsReadyForNext[gameId].Count, GetActiveTeamCount(gameId));
-
-            // Flag that we need to broadcast after exiting the lock
+                teamId, gameId, _teamsReadyForNext[gameId].Count, GetActiveTeamCount(gameId));
             needToBroadcast = true;
           }
           else
@@ -419,7 +436,6 @@ namespace TriviaApp.Hubs
           }
         }
 
-        // Only broadcast if this is a new ready signal - OUTSIDE the lock
         if (needToBroadcast)
         {
           await Clients.Group(gameId.ToString()).SendAsync("TeamSignaledReady", teamId);
@@ -434,7 +450,6 @@ namespace TriviaApp.Hubs
           readyCount = _teamsReadyForNext.ContainsKey(gameId) ? _teamsReadyForNext[gameId].Count : 0;
           shouldAdvance = readyCount >= totalActiveTeams && totalActiveTeams > 0;
 
-          // If we should advance, clear the ready status now
           if (shouldAdvance)
           {
             _logger.LogInformation("All teams ready for game {GameId}, clearing ready state before advancing.", gameId);
@@ -470,7 +485,6 @@ namespace TriviaApp.Hubs
         }
       }
 
-      // Clean up the request throttling dictionary
       lock (_lastGameStateRequest)
       {
         _lastGameStateRequest.Remove(Context.ConnectionId);
@@ -482,30 +496,80 @@ namespace TriviaApp.Hubs
     public async Task JoinOperatorGroup()
     {
       await Groups.AddToGroupAsync(Context.ConnectionId, "Operators");
-      _logger.LogInformation("User added to Operators group.");
+      _logger.LogInformation("Added connection {ConnectionId} to Operators group", Context.ConnectionId);
       await Clients.Caller.SendAsync("JoinedOperatorGroup", "You have joined the Operators group.");
+    }
+
+    public async Task RequestNextQuestion(int gameId)
+    {
+      try
+      {
+        var connection = Context.ConnectionId;
+        if (!_connectionMappings.ContainsKey(connection))
+        {
+          _logger.LogWarning("Connection {ConnectionId} tried to request next question without joining a game", connection);
+          return;
+        }
+
+        var (_, teamId) = _connectionMappings[connection];
+        var team = await _dbContext.Teams.FindAsync(teamId);
+        if (team == null || !team.IsOperator)
+        {
+          _logger.LogWarning("Non-operator team {TeamId} tried to request next question for game {GameId}", teamId, gameId);
+          return;
+        }
+
+        _logger.LogInformation("Operator {TeamId} requested to force advance to next question in game {GameId}", teamId, gameId);
+
+        var game = await _dbContext.Games
+            .Include(g => g.GameQuestions)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
+
+        if (game == null)
+        {
+          _logger.LogWarning("Game {GameId} not found for RequestNextQuestion", gameId);
+          return;
+        }
+
+        if (game.CurrentQuestionId.HasValue)
+        {
+          var currentGameQuestion = game.GameQuestions
+              .FirstOrDefault(gq => gq.QuestionId == game.CurrentQuestionId);
+
+          if (currentGameQuestion != null && !currentGameQuestion.IsAnswered)
+          {
+            _logger.LogInformation("Marking current question {QuestionId} as answered by operator request",
+                game.CurrentQuestionId);
+            currentGameQuestion.IsAnswered = true;
+            await _dbContext.SaveChangesAsync();
+          }
+        }
+
+        _logger.LogInformation("Advancing to next question for game {GameId} by operator request", gameId);
+        await _gameService.AdvanceToNextQuestionAsync(gameId);
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex, "Error in RequestNextQuestion for game {GameId}", gameId);
+      }
     }
 
     public async Task RequestGameState(int gameId, int teamId)
     {
       try
       {
-        // Add throttling to prevent excessive requests
         bool shouldProcess = true;
         lock (_lastGameStateRequest)
         {
-          // Check when the last request was made by this connection
           if (_lastGameStateRequest.TryGetValue(Context.ConnectionId, out var lastRequest))
           {
             if (DateTime.UtcNow - lastRequest < _gameStateRequestThrottle)
             {
-              // Too soon since last request, skip this one
-              _logger.LogInformation("Throttling RequestGameState for team {TeamId} in game {GameId} - too many requests", teamId, gameId);
+              _logger.LogInformation("Throttling RequestGameState for team {TeamId} in game {GameId} - too many requests",
+                  teamId, gameId);
               shouldProcess = false;
             }
           }
-
-          // Update the last request time
           _lastGameStateRequest[Context.ConnectionId] = DateTime.UtcNow;
         }
 
@@ -517,8 +581,8 @@ namespace TriviaApp.Hubs
         _logger.LogInformation("Team {TeamId} requested current game state for game {GameId}", teamId, gameId);
 
         var game = await _dbContext.Games
-          .Include(g => g.CurrentQuestion)
-          .FirstOrDefaultAsync(g => g.Id == gameId);
+            .Include(g => g.CurrentQuestion)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
 
         if (game == null)
         {
@@ -526,110 +590,86 @@ namespace TriviaApp.Hubs
           return;
         }
 
-        // Always send game state
         _logger.LogInformation("Sending GameState for game {GameId} to team {TeamId}: Status={Status}",
-          gameId, teamId, game.Status);
+            gameId, teamId, game.Status);
 
         await Clients.Caller.SendAsync("GameState", new
         {
-          gameId = game.Id,
-          status = game.Status,
-          name = game.Name
+          GameId = game.Id,
+          Status = game.Status,
+          Name = game.Name
         });
 
-        // Only proceed if game is in progress and has a current question
         if (game.Status == "InProgress" && game.CurrentQuestion != null)
         {
           _logger.LogInformation("Game {GameId} is in progress with question {QuestionId}",
-            gameId, game.CurrentQuestionId);
+              gameId, game.CurrentQuestionId);
 
-          // Check if this team has already answered the current question
           var hasAnswered = await _dbContext.Answers
-            .AnyAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == game.CurrentQuestionId);
+              .AnyAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == game.CurrentQuestionId);
 
           _logger.LogInformation("Team {TeamId} in game {GameId} has answered current question {QuestionId}: {HasAnswered}",
-            teamId, gameId, game.CurrentQuestionId, hasAnswered);
+              teamId, gameId, game.CurrentQuestionId, hasAnswered);
 
-          // Check if all teams have answered this question already
           var totalActiveTeams = GetActiveTeamCount(gameId);
           var submittedCount = await _dbContext.Answers
-            .Where(a => a.GameId == gameId && a.QuestionId == game.CurrentQuestionId)
-            .Select(a => a.TeamId)
-            .Distinct()
-            .CountAsync();
+              .Where(a => a.GameId == gameId && a.QuestionId == game.CurrentQuestionId)
+              .Select(a => a.TeamId)
+              .Distinct()
+              .CountAsync();
 
           _logger.LogInformation("Game {GameId}: {SubmittedCount}/{TotalActiveTeams} teams have submitted answers",
-            gameId, submittedCount, totalActiveTeams);
+              gameId, submittedCount, totalActiveTeams);
 
-          // Use the same event sequence logic as in JoinGame
           bool allTeamsSubmitted = submittedCount >= totalActiveTeams && totalActiveTeams > 0;
+          bool sendQuestion = true;
+          bool sendAnswerSubmitted = hasAnswered;
+          bool sendDisplayAnswer = false;
 
-          // Decide what events to send and in what order
-          bool sendQuestion = true;      // Should we send Question event?
-          bool sendAnswerSubmitted = hasAnswered;  // Should we send AnswerSubmitted event?
-          bool sendDisplayAnswer = false;   // Should we send DisplayAnswer event?
-
-          // All teams have answered - prioritize DisplayAnswer
           if (allTeamsSubmitted)
           {
             _logger.LogInformation("All teams have answered question {QuestionId} in game {GameId} - sending DisplayAnswer for state request",
-              game.CurrentQuestionId, gameId);
-
+                game.CurrentQuestionId, gameId);
             sendDisplayAnswer = true;
-
-            // If we're showing the answer, don't send the question - client can handle this
-            if (hasAnswered)
-            {
-              sendQuestion = false;
-            }
-          }
-          else if (hasAnswered)
-          {
-            _logger.LogInformation("Team {TeamId} already answered but not all teams have - sending answer state hints",
-              teamId);
+            if (hasAnswered) sendQuestion = false;
           }
 
-          // Now send the events in the right sequence
-
-          // 1. First send the question if needed (so client has context)
           if (sendQuestion)
           {
             var questionData = new
             {
-              id = game.CurrentQuestion.Id,
-              text = game.CurrentQuestion.Text,
-              options = game.CurrentQuestion.Options,
-              round = game.CurrentRound,
-              questionNumber = game.CurrentQuestionNumber
+              Id = game.CurrentQuestion.Id,
+              Text = game.CurrentQuestion.Text,
+              Options = game.CurrentQuestion.Options,
+              Round = game.CurrentRound,
+              QuestionNumber = game.CurrentQuestionNumber,
+              QuestionType = game.CurrentQuestion.Type // Added for client-side component rendering
             };
 
             _logger.LogInformation("Sending Question data to team {TeamId} for question {QuestionId}",
-              teamId, game.CurrentQuestionId);
+                teamId, game.CurrentQuestionId);
             await Clients.Caller.SendAsync("Question", questionData);
           }
 
-          // 2. If team has already answered, send AnswerSubmitted
           if (sendAnswerSubmitted)
           {
             _logger.LogInformation("Sending AnswerSubmitted event to team {TeamId} in response to state request", teamId);
-            await Clients.Caller.SendAsync("AnswerSubmitted", new { teamId, isCorrect = true });
+            await Clients.Caller.SendAsync("AnswerSubmitted", new { TeamId = teamId, IsCorrect = true });
           }
 
-          // 3. Finally, send DisplayAnswer if all teams have answered
           if (sendDisplayAnswer)
           {
             _logger.LogInformation("Sending DisplayAnswer to team {TeamId} for question {QuestionId}",
-              teamId, game.CurrentQuestionId);
+                teamId, game.CurrentQuestionId);
             await Clients.Caller.SendAsync("DisplayAnswer", game.CurrentQuestionId, game.CurrentQuestion.CorrectAnswer);
 
-            // Check if this team has previously signaled ready
             bool hasExplicitlySignaledReady = false;
             lock (_teamsReadyForNext)
             {
-              hasExplicitlySignaledReady = _teamsReadyForNext.ContainsKey(gameId) && _teamsReadyForNext[gameId].Contains(teamId);
+              hasExplicitlySignaledReady = _teamsReadyForNext.ContainsKey(gameId) &&
+                                          _teamsReadyForNext[gameId].Contains(teamId);
             }
 
-            // Only send TeamSignaledReady if they've explicitly clicked the button
             if (hasExplicitlySignaledReady)
             {
               _logger.LogInformation("Team {TeamId} previously signaled ready - sending TeamSignaledReady event", teamId);
@@ -644,6 +684,145 @@ namespace TriviaApp.Hubs
       }
     }
 
+    public async Task JoinGameSilently(int gameId, int teamId)
+    {
+      try
+      {
+        _logger.LogInformation("Processing JoinGameSilently request for team {TeamId} in game {GameId}, connection {ConnectionId}",
+            teamId, gameId, Context.ConnectionId);
 
+        bool alreadyJoined = false;
+        lock (_connectionMappings)
+        {
+          if (_connectionMappings.TryGetValue(Context.ConnectionId, out var mapping))
+          {
+            if (mapping.gameId == gameId && mapping.teamId == teamId)
+            {
+              _logger.LogInformation("Connection {ConnectionId} already joined for team {TeamId} in game {GameId}, skipping duplicate join",
+                  Context.ConnectionId, teamId, gameId);
+              alreadyJoined = true;
+            }
+          }
+        }
+
+        if (!alreadyJoined)
+        {
+          await Groups.AddToGroupAsync(Context.ConnectionId, gameId.ToString());
+          _logger.LogInformation("Team {TeamId} joined game {GameId} silently, ConnectionId: {ConnectionId}",
+              teamId, gameId, Context.ConnectionId);
+
+          lock (_activeTeams)
+          {
+            if (!_activeTeams.ContainsKey(gameId))
+              _activeTeams[gameId] = new HashSet<int>();
+            _activeTeams[gameId].Add(teamId);
+          }
+          lock (_connectionMappings)
+          {
+            _connectionMappings[Context.ConnectionId] = (gameId, teamId);
+          }
+
+          // When joining silently (e.g., toggling from operator view), don't broadcast to other teams
+          // await Clients.Group(gameId.ToString()).SendAsync("TeamJoined", new { GameId = gameId, TeamId = teamId });
+        }
+
+        // Always send the full game state to the client during silent join,
+        // as this is likely a toggle between views
+        var game = await _dbContext.Games
+            .Include(g => g.CurrentQuestion)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
+
+        if (game != null)
+        {
+          _logger.LogInformation("Sending full GameState for silent join of team {TeamId} in game {GameId}: Status={Status}",
+              teamId, gameId, game.Status);
+
+          // Step 1: Send general game state
+          await Clients.Caller.SendAsync("GameState", new
+          {
+            GameId = game.Id,
+            Status = game.Status,
+            Name = game.Name
+          });
+
+          // Step 2: If in progress, send current question
+          if (game.Status == "InProgress" && game.CurrentQuestion != null)
+          {
+            bool hasAnswered = false;
+
+            if (game.CurrentQuestionId.HasValue)
+            {
+              hasAnswered = await _dbContext.Answers
+                  .AnyAsync(a => a.GameId == gameId && a.TeamId == teamId && a.QuestionId == game.CurrentQuestionId);
+
+              _logger.LogInformation("Team {TeamId} silent join to game {GameId} - has already answered current question {QuestionId}: {HasAnswered}",
+                  teamId, gameId, game.CurrentQuestionId, hasAnswered);
+
+              int totalActiveTeams = GetActiveTeamCount(gameId);
+              int submittedCount = await _dbContext.Answers
+                  .Where(a => a.GameId == gameId && a.QuestionId == game.CurrentQuestionId)
+                  .Select(a => a.TeamId)
+                  .Distinct()
+                  .CountAsync();
+
+              bool allTeamsSubmitted = submittedCount >= totalActiveTeams && totalActiveTeams > 0;
+
+              // Step 3: Send question data regardless of phase for toggle consistency
+              var questionData = new
+              {
+                Id = game.CurrentQuestion.Id,
+                Text = game.CurrentQuestion.Text,
+                Options = game.CurrentQuestion.Options,
+                Round = game.CurrentRound,
+                QuestionNumber = game.CurrentQuestionNumber,
+                QuestionType = game.CurrentQuestion.Type
+              };
+
+              await Clients.Caller.SendAsync("Question", questionData);
+              _logger.LogInformation("Sent current question {QuestionId} data during silent join for team {TeamId}",
+                  game.CurrentQuestionId, teamId);
+
+              // Step 4: If team has already answered, send the submission status
+              if (hasAnswered)
+              {
+                _logger.LogInformation("Sending AnswerSubmitted for team {TeamId} during silent join", teamId);
+                await Clients.Caller.SendAsync("AnswerSubmitted", new { TeamId = teamId, IsCorrect = true });
+              }
+
+              // Step 5: If all teams have answered, send the correct answer
+              if (allTeamsSubmitted || game.CurrentQuestion.Type?.ToLowerInvariant() == "halftimebreak")
+              {
+                _logger.LogInformation("Sending DisplayAnswer during silent join for team {TeamId}, question {QuestionId}",
+                    teamId, game.CurrentQuestionId);
+                await Clients.Caller.SendAsync("DisplayAnswer", game.CurrentQuestionId, game.CurrentQuestion.CorrectAnswer);
+
+                // Step 6: Check if team has signaled ready
+                bool hasExplicitlySignaledReady = false;
+                lock (_teamsReadyForNext)
+                {
+                  hasExplicitlySignaledReady = _teamsReadyForNext.ContainsKey(gameId) &&
+                                              _teamsReadyForNext[gameId].Contains(teamId);
+                }
+
+                if (hasExplicitlySignaledReady)
+                {
+                  _logger.LogInformation("Team {TeamId} previously ready for game {GameId}, sending TeamSignaledReady during silent join",
+                      teamId, gameId);
+                  await Clients.Caller.SendAsync("TeamSignaledReady", teamId);
+                }
+              }
+            }
+          }
+        }
+        else
+        {
+          _logger.LogWarning("Game {GameId} not found during JoinGameSilently", gameId);
+        }
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex, "Error in JoinGameSilently for game {GameId}, team {TeamId}", gameId, teamId);
+      }
+    }
   }
 }
